@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bbr-digital-expander"
+version = "1.0.0"
+description = "Driver for the BBR Digital Expander: four encoder inputs, four colour/distance sensor ports, four condition-driven digital outputs, an IMU and an onboard odometry localizer, over one I2C connection."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "Building Block Robotics", email = "support@buildingblockrobotics.com" }]
+keywords = ["i2c", "raspberry-pi", "encoder", "quadrature", "color", "distance", "imu", "odometry", "robotics", "ftc"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Education",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Hardware :: Hardware Drivers",
+]
+dependencies = ["smbus2>=0.4"]
+
+[project.urls]
+Documentation = "https://expander.buildingblockrobotics.com/"
+Source = "https://github.com/BuildingBlockRobotics/DigitalExpander-Python"
+
+[tool.setuptools]
+packages = ["bbr_digital_expander"]
+
+[tool.setuptools.package-data]
+bbr_digital_expander = ["py.typed"]
