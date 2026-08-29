@@ -135,6 +135,15 @@ except BBRError as exc:
     print(f"expander: {exc}")
 ```
 
+A snapshot read that never reached the device is the one exception to
+"failure is an exception". Telemetry, IMU and localizer reads serve the last
+good snapshot instead of raising — a bus being torn down mid-transfer, or a
+burst of noise that corrupts three localizer blocks in a row, should not kill
+a running program. `is_data_fresh()` reports whether the last read was real.
+Fail-loud survives in two places: a device that has never answered raises
+`TransportError`, and a streak that keeps failing for over half a second
+(5+ reads) raises `BBRError`. The FTC driver behaves identically.
+
 There are exactly two sentinels rather than exceptions, both deliberate and
 both shared with the other drivers:
 

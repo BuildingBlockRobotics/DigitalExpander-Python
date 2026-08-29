@@ -15,8 +15,8 @@ import unittest
 from bbr_digital_expander import (
     BBRDigitalExpander,
     BadArgumentError,
+    BBRError,
     ChannelMode,
-    CrcMismatchError,
     DistanceClass,
     EncoderDirection,
     LocalizerNotRunningError,
@@ -24,6 +24,7 @@ from bbr_digital_expander import (
     NoImuError,
     ProtocolMismatchError,
     SensorType,
+    TransportError,
     WrongChannelModeError,
     WrongDeviceError,
     WrongSensorTypeError,
@@ -312,11 +313,41 @@ class TestLocalizer(unittest.TestCase):
         self.assertEqual((p.x_mm, p.y_mm), (1500.0, -250.0))
         self.assertAlmostEqual(p.heading_deg, 90.0, places=2)
 
-    def test_a_corrupt_block_is_refused_not_returned(self):
+    def test_a_corrupt_block_serves_the_last_pose_not_the_suspect_one(self):
         exp, bus = self._running()
+        good = exp.get_pose()
         bus.set_i16(R.REG_LOC_X, 999)  # CRC now stale
-        with self.assertRaises(CrcMismatchError):
+        served = exp.get_pose()
+        self.assertEqual((served.x_mm, served.y_mm), (good.x_mm, good.y_mm))
+        self.assertFalse(exp.is_data_fresh())
+
+    def test_a_corrupt_block_raises_if_no_pose_was_ever_read(self):
+        exp, bus = self._running()
+        bus.set_i16(R.REG_LOC_X, 999)  # CRC stale before any good read
+        with self.assertRaises(TransportError):
             exp.get_pose()
+
+    def test_a_corruption_streak_that_outlives_a_shutdown_raises(self):
+        exp, bus = self._running()
+        exp.get_pose()
+        bus.set_i16(R.REG_LOC_X, 999)
+        for _ in range(4):
+            exp.get_pose()  # stale but tolerated
+        # Backdate the streak: five reads is only a fault once it has also
+        # lasted longer than any plausible teardown.
+        exp._fail_streak_start -= 1.0
+        with self.assertRaises(BBRError):
+            exp.get_pose()
+
+    def test_a_good_read_clears_the_streak(self):
+        exp, bus = self._running()
+        exp.get_pose()
+        bus.set_i16(R.REG_LOC_X, 999)
+        exp.get_pose()
+        self.assertFalse(exp.is_data_fresh())
+        bus.restamp_localizer_crc()  # bus recovers
+        self.assertEqual(exp.get_pose().x_mm, 999.0)
+        self.assertTrue(exp.is_data_fresh())
 
     def test_pose_before_the_localizer_runs_refuses(self):
         exp, bus = begun()

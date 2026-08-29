@@ -29,9 +29,9 @@ from typing import List, Optional, Sequence, Tuple, Union
 from . import regmap as R
 from .errors import (
     BadArgumentError,
+    BBRError,
     CommandFailedError,
     CommandTimeoutError,
-    CrcMismatchError,
     ImuFaultError,
     LocalizerNotRunningError,
     NoImuError,
@@ -128,6 +128,14 @@ def _looks_like_failed_read(d: bytes) -> bool:
     return all(b == d[0] for b in d)
 
 
+#: A failed-read streak this long AND this old is a real fault, not a
+#: program shutting down mid-transfer. Both must be true: a slow loop can
+#: take half a second over a couple of reads, a fast one can rattle off five
+#: in a few milliseconds while the bus is being released.
+_FAIL_STREAK_MIN_READS = 5
+_FAIL_STREAK_MIN_MS = 500
+
+
 def _crc16_profibus(data: bytes) -> int:
     """PROFIBUS CRC16 (poly 0x1DCF, init 0xFFFF, no reflection, xor-out
     0xFFFF) — the same algorithm the OctoQuad uses, so ported verification
@@ -187,6 +195,13 @@ class BBRDigitalExpander:
         self._token = 0
         self._command_result = R.OK
         self._imu_verified = False
+
+        self._last_read_fresh = True
+        self._fail_streak = 0
+        self._fail_streak_start = 0.0
+        self._last_good_telemetry: Optional[Telemetry] = None
+        self._last_good_imu: Optional[ImuState] = None
+        self._last_good_localizer: Optional[LocalizerState] = None
 
         self._telemetry: Optional[Telemetry] = None
         self._telemetry_at = 0.0
@@ -492,6 +507,44 @@ class BBRDigitalExpander:
 
     # ------------------------------------------------------------- telemetry
 
+    # --------------------------------------------------- failed-read policy
+
+    def is_data_fresh(self) -> bool:
+        """True when the most recent snapshot read actually reached the
+        device. ``False`` means the readers are serving the last good
+        snapshot — expected for a moment while a program is shutting the bus
+        down, a diagnostic worth showing otherwise."""
+        return self._last_read_fresh
+
+    def _handle_failed_read(self, last_good, what: str):
+        """A snapshot read never reached the device: serve the last good
+        reading rather than raising mid-loop, but stay fail-loud where it
+        matters — raise if the device has NEVER answered, or if the streak has
+        outlived any plausible shutdown. Same policy as the FTC driver."""
+        self._last_read_fresh = False
+        now = time.monotonic()
+        if self._fail_streak == 0:
+            self._fail_streak_start = now
+        self._fail_streak += 1
+        if last_good is None:
+            raise TransportError(
+                f"{what} read did not reach the device and it has never answered — "
+                "check that it is wired, powered and at the address you gave"
+            )
+        if (
+            self._fail_streak >= _FAIL_STREAK_MIN_READS
+            and (now - self._fail_streak_start) * 1000 >= _FAIL_STREAK_MIN_MS
+        ):
+            raise BBRError(
+                f"{what} reads have been failing for over half a second — not a "
+                "normal shutdown; check wiring, cable routing and power"
+            )
+        return last_good
+
+    def _note_good_read(self) -> None:
+        self._last_read_fresh = True
+        self._fail_streak = 0
+
     def read_telemetry(self) -> Telemetry:
         """One snapshot of the whole telemetry block."""
         self._require_begun()
@@ -499,11 +552,11 @@ class BBRDigitalExpander:
         d = self.read_registers(base, 96)
         # The timestamp is nonzero from the first millisecond of boot, so a
         # uniform block can only be a transfer that never happened.
+        # A uniform block is a transfer that never happened — usually a bus
+        # being torn down, not a fault. Serve the last good snapshot; the
+        # streak policy above turns a persistent failure into a loud error.
         if _looks_like_failed_read(d):
-            raise TransportError(
-                "telemetry read came back uniform — the transfer never reached the "
-                "expander"
-            )
+            return self._handle_failed_read(self._last_good_telemetry, "Telemetry")
 
         t = Telemetry()
         for i in range(R.NUM_ENCODERS):
@@ -537,6 +590,8 @@ class BBRDigitalExpander:
             t.sensor[i] = s
         t.present_mask = d[R.REG_SENSOR_PRESENT_MASK - base]
         t.timestamp_micros = _ule32(d, R.REG_TELEMETRY_TIMESTAMP - base)
+        self._note_good_read()
+        self._last_good_telemetry = t
         return t
 
     @property
@@ -1091,9 +1146,7 @@ class BBRDigitalExpander:
         base = R.SNAP_IMU_START
         d = self.read_registers(base, 32)
         if _looks_like_failed_read(d):
-            raise TransportError(
-                "IMU read came back uniform — the transfer never reached the expander"
-            )
+            return self._handle_failed_read(self._last_good_imu, "IMU")
         s = ImuState(status=d[R.REG_IMU_STATUS - base])
         if not s.status & R.ISTAT_PRESENT:
             self._imu_verified = False  # the IMU vanished after verification
@@ -1116,6 +1169,8 @@ class BBRDigitalExpander:
         ]
         s.calib_grade = d[R.REG_IMU_CALIB - base]
         s.timestamp_micros = _ule32(d, R.REG_IMU_TIMESTAMP - base)
+        self._note_good_read()
+        self._last_good_imu = s
         return s
 
     # ------------------------------------------------------------ localizer
@@ -1128,28 +1183,26 @@ class BBRDigitalExpander:
 
         # I2C acknowledges bytes without verifying them, so a noise-flipped bit
         # would otherwise arrive looking like a perfectly valid pose. Re-read
-        # on mismatch; give up rather than return a suspect pose.
+        # on mismatch, then serve the last good pose rather than a suspect one.
         for attempt in range(1, 4):
             d = self.read_registers(base, 22)
             if _looks_like_failed_read(d):
-                raise TransportError(
-                    "localizer read came back uniform — the transfer never reached the "
-                    "expander"
-                )
+                return self._handle_failed_read(self._last_good_localizer, "Localizer")
             if _crc16_profibus(d[:20]) == _le16(d, crc_off):
                 break
+            # Three corrupt reads in a row is a bad moment on the bus, not
+            # proof the bus is gone: a burst of noise mid-run would otherwise
+            # kill the program outright. Treat it as a failed read and let the
+            # streak policy escalate if the corruption actually persists.
             if attempt == 3:
-                raise CrcMismatchError(
-                    "localizer block failed its checksum three times — I2C corruption; "
-                    "check wiring, cable routing and grounding"
-                )
+                return self._handle_failed_read(self._last_good_localizer, "Localizer")
 
         raw_status = d[R.REG_LOC_STATUS - base]
         try:
             status = LocalizerStatus(raw_status)
         except ValueError:
             status = LocalizerStatus.UNKNOWN
-        return LocalizerState(
+        state = LocalizerState(
             status=status,
             flags=d[R.REG_LOC_FLAGS - base],
             vel_x_mm_per_sec=float(_sle16(d, R.REG_LOC_VEL_X - base)),
@@ -1160,6 +1213,9 @@ class BBRDigitalExpander:
             heading_rad=_sle16(d, R.REG_LOC_H - base) / R.LOC_HEADING_SCALE,
             timestamp_micros=_ule32(d, R.REG_LOC_TIMESTAMP - base),
         )
+        self._note_good_read()
+        self._last_good_localizer = state
+        return state
 
     def read_localizer(self) -> LocalizerState:
         """Localizer snapshot, failing unless it is RUNNING."""

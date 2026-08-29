@@ -130,6 +130,11 @@ class WrongChannelModeError(BBRError):
 
 
 class CrcMismatchError(BBRError):
+    """Kept for status parity with the Arduino driver, which still reports
+    ``CrcMismatch``. This driver no longer raises it: a localizer block that
+    fails its checksum three times serves the last good pose instead, and a
+    streak that persists raises through the failed-read policy."""
+
     status = Status.CRC_MISMATCH
 
 
