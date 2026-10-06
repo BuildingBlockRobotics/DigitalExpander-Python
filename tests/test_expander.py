@@ -13,6 +13,7 @@ import math
 import unittest
 
 from bbr_digital_expander import (
+    CommandFailedError,
     BBRDigitalExpander,
     BadArgumentError,
     BBRError,
@@ -384,6 +385,34 @@ class TestLocalizer(unittest.TestCase):
         exp.set_pose(100, -200, math.pi * 3)  # 540 degrees
         h = int.from_bytes(bus.regs[R.LOCWIN_POSE_H:R.LOCWIN_POSE_H + 2], "little", signed=True)
         self.assertAlmostEqual(h / R.LOC_HEADING_SCALE, -math.pi, places=3)
+
+
+
+class TestCalibrationNeverStopsTheProgram(unittest.TestCase):
+    """A nudge during calibration must not end a match: the firmware keeps
+    the previous bias (and still starts the localizer), so the driver
+    reports it as False instead of raising."""
+
+    def test_calibrate_gyro_reports_a_fresh_bias(self):
+        exp, _ = begun()
+        self.assertTrue(exp.calibrate_gyro())
+
+    def test_calibrate_gyro_returns_false_when_the_robot_moved(self):
+        exp, bus = begun()
+        bus.command_errors[R.CMD_CALIBRATE_GYRO] = R.ERR_IMU_NOT_STATIONARY
+        self.assertFalse(exp.calibrate_gyro())
+
+    def test_reset_localizer_returns_false_when_the_robot_moved(self):
+        exp, bus = begun()
+        bus.command_errors[R.CMD_LOC_RESET] = R.ERR_IMU_NOT_STATIONARY
+        self.assertFalse(exp.reset_localizer_and_calibrate_imu())
+
+    def test_other_failures_still_raise(self):
+        exp, bus = begun()
+        bus.command_errors[R.CMD_LOC_RESET] = R.ERR_LOC_BAD_PARAMS
+        with self.assertRaises(CommandFailedError) as ctx:
+            exp.reset_localizer_and_calibrate_imu()
+        self.assertEqual(ctx.exception.command_result, R.ERR_LOC_BAD_PARAMS)
 
 
 if __name__ == "__main__":

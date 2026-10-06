@@ -854,10 +854,27 @@ class BBRDigitalExpander:
         self._require_imu()
         self.run_command(R.CMD_IMU_RESET_HEADING, 0, 10)
 
-    def calibrate_gyro(self) -> None:
-        """Re-estimate gyro bias (about a second). The robot must be still."""
+    def calibrate_gyro(self) -> bool:
+        """Re-estimate gyro bias (about a second). Keep the robot still.
+
+        Returns ``True`` with a fresh bias, or ``False`` if the robot moved:
+        the previous bias is kept and the IMU carries on, so a bump never
+        stops the program. Call again while still if heading drift matters."""
         self._require_imu()
-        self.run_command(R.CMD_CALIBRATE_GYRO, 0, R.CMD_CALIBRATE_GYRO_MAX_MS)
+        return self._run_calibration(R.CMD_CALIBRATE_GYRO, R.CMD_CALIBRATE_GYRO_MAX_MS)
+
+    def _run_calibration(self, opcode: int, max_ms: int) -> bool:
+        """A calibration that saw the robot move is not worth an exception:
+        the firmware keeps the previous bias (and LOC_RESET still resets the
+        pose and starts the localizer), so nothing is less usable than
+        before."""
+        try:
+            self.run_command(opcode, 0, max_ms)
+        except CommandFailedError as exc:
+            if exc.command_result != R.ERR_IMU_NOT_STATIONARY:
+                raise
+            return False
+        return True
 
     # ==================================================================
     # ADVANCED TIER — the full register map. Nothing below auto-saves;
@@ -1291,12 +1308,17 @@ class BBRDigitalExpander:
             velocity_interval_ms=w[R.LOCWIN_VEL_INTERVAL_MS - R.CFGWIN_BASE],
         )
 
-    def reset_localizer_and_calibrate_imu(self) -> None:
+    def reset_localizer_and_calibrate_imu(self) -> bool:
         """Latch stored parameters, zero the pose and calibrate the gyro (about
-        a second). The robot must be completely still. Follow with
-        :meth:`wait_for_localizer_ready` before reading a pose."""
+        a second). Keep the robot completely still. Follow with
+        :meth:`wait_for_localizer_ready` before reading a pose.
+
+        Returns ``True`` with a fresh gyro bias, or ``False`` if the robot
+        moved during calibration. Either way the pose is reset and the
+        localizer starts; ``False`` only means the previous bias is kept.
+        Bad localizer parameters still raise."""
         self._require_imu()
-        self.run_command(R.CMD_LOC_RESET, 0, R.CMD_LOC_RESET_MAX_MS)
+        return self._run_calibration(R.CMD_LOC_RESET, R.CMD_LOC_RESET_MAX_MS)
 
     def wait_for_localizer_ready(self, timeout_ms: int = 5000) -> None:
         """Block until the localizer reaches RUNNING; keep the robot still.

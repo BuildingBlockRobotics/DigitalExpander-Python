@@ -24,6 +24,7 @@ class FakeExpanderBus:
         self.closed = False
         self.commands: List[tuple] = []  #: (opcode, arg, token), in order
         self.writes: List[tuple] = []  #: (reg, bytes), in order
+        self.command_errors: dict = {}  #: opcode -> ERR_* code to fail it with
 
         self.regs[R.REG_DEVICE_ID] = R.DEVICE_ID_VALUE
         self.regs[R.REG_FW_VERSION_MAJOR] = 1
@@ -98,6 +99,10 @@ class FakeExpanderBus:
         arg = self.regs[R.REG_COMMAND_ARG]
         self.commands.append((opcode, arg, self.regs[R.REG_COMMAND_TOKEN]))
         self.regs[R.REG_COMMAND_ECHO] = opcode
+        if opcode in self.command_errors:
+            self.regs[R.REG_COMMAND_RESULT] = self.command_errors[opcode]
+            self.regs[R.REG_COMMAND_STATUS] = R.CMDSTAT_ERROR
+            return
         self.regs[R.REG_COMMAND_RESULT] = R.OK
         self.regs[R.REG_COMMAND_STATUS] = R.CMDSTAT_DONE
         if opcode == R.CMD_CFG_SAVE_FLASH:
