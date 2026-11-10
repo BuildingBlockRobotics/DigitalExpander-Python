@@ -278,6 +278,14 @@ class BBRDigitalExpander:
                 "mis-assembled board"
             )
         self._capabilities = d[R.REG_CAPABILITIES]
+        # Carry on from the last token the board accepted. The board keeps its
+        # command cache until it reboots, but each run of a script starts over:
+        # counting from 1 again would make the first command replay (silently
+        # not run) or fail ERR_TOKEN_REUSE whenever it lands on the cached token.
+        try:
+            self._token = self.read_registers(R.REG_COMMAND_TOKEN, 1)[0]
+        except TransportError:
+            pass  # keep the current token; a flaky read must not fail begin()
         self._begun = True
         return self
 

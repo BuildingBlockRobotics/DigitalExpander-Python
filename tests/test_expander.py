@@ -168,6 +168,21 @@ class TestCommands(unittest.TestCase):
         self.assertNotIn(R.TOKEN_NONE, tokens)
         self.assertEqual(exp.encoder_count(0), 0)
 
+    def test_a_restarted_program_does_not_reuse_the_boards_token(self):
+        # The board's command cache outlives the program: a second run that
+        # counted from 1 again would land on the token it already holds.
+        exp, bus = begun()
+        exp.reset_encoder(0)  # the block write leaves its token in COMMAND_TOKEN
+        again = BBRDigitalExpander(bus=bus).begin()
+        again.reset_encoder(0)
+        self.assertNotEqual(bus.commands[-1][2], bus.commands[0][2])
+
+    def test_token_continues_past_the_wrap_without_using_none(self):
+        exp, bus = begun()
+        bus.regs[R.REG_COMMAND_TOKEN] = 0xFF
+        BBRDigitalExpander(bus=bus).begin().reset_encoder(0)
+        self.assertEqual(bus.commands[-1][2], 1)
+
     def test_teach_colour_captures_stores_and_saves(self):
         exp, bus = begun()
         exp.teach_color(1, 2)
